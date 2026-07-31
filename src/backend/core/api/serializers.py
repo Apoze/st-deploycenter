@@ -13,6 +13,7 @@ from core.entitlements.resolvers.extended_admin_entitlement_resolver import (
     ExtendedAdminEntitlementResolver,
 )
 from core.services import get_service_handler
+from core.services import proconnect as proconnect_service
 
 
 class IntegerChoicesField(serializers.ChoiceField):
@@ -461,40 +462,35 @@ class ServiceSubscriptionSerializer(serializers.ModelSerializer):
         self.apply_entitlement_configs(instance)
         return instance
 
-    def apply_entitlement_configs(self, subscription):
-        """Apply pending entitlement configs to the subscription.
+    def _validate_entitlement_types(self, service):
+        """Validate pending entitlement types are appropriate for the service.
 
-        Only updates default entitlements (where account=None).
-        Account-specific entitlements are never modified by this method.
-        Validates that entitlement types are appropriate for the service.
+        Runs at ``validate()`` time (during ``is_valid()``), i.e. *before* the
+        subscription is saved — so an invalid type raises a 400 before any
+        ProConnect push happens, instead of rolling one back afterwards.
         """
-        if not self._pending_entitlement_configs:
+        if not self._pending_entitlement_configs or service is None:
             return
 
-        # Get valid entitlement types for this service
-        handler = get_service_handler(subscription.service)
+        handler = get_service_handler(service)
         valid_types = set()
         if handler:
             valid_types = {d["type"] for d in handler.get_default_entitlements()}
+        valid_enum_types = [t.value for t in models.Entitlement.EntitlementType]
 
         for config_data in self._pending_entitlement_configs:
             entitlement_type = config_data["type"]
-            account_type = config_data["account_type"]
-            config = config_data["config"]
 
-            # Validate entitlement type is appropriate for this service
-            # Only validate if the service has defined valid types (via handler)
+            # Only validate against the handler when it defines valid types.
             if valid_types and entitlement_type not in valid_types:
                 raise serializers.ValidationError(
                     {
                         "entitlements": f"Entitlement type '{entitlement_type}' is not valid "
-                        f"for service type '{subscription.service.type}'. "
+                        f"for service type '{service.type}'. "
                         f"Valid types: {', '.join(str(t) for t in valid_types)}"
                     }
                 )
 
-            # Also validate the type is a valid EntitlementType enum value
-            valid_enum_types = [t.value for t in models.Entitlement.EntitlementType]
             if entitlement_type not in valid_enum_types:
                 raise serializers.ValidationError(
                     {
@@ -503,13 +499,24 @@ class ServiceSubscriptionSerializer(serializers.ModelSerializer):
                     }
                 )
 
+    def apply_entitlement_configs(self, subscription):
+        """Persist pending entitlement configs on the subscription.
+
+        Only updates default entitlements (where account=None); account-specific
+        entitlements are never modified. Types are validated up-front in
+        :meth:`_validate_entitlement_types` (at ``is_valid()`` time).
+        """
+        if not self._pending_entitlement_configs:
+            return
+
+        for config_data in self._pending_entitlement_configs:
             # Only update default entitlements (account=None), never account-specific ones
             # Use update_or_create for atomic operation
             subscription.entitlements.update_or_create(
-                type=entitlement_type,
-                account_type=account_type,
+                type=config_data["type"],
+                account_type=config_data["account_type"],
                 account=None,
-                defaults={"config": config},
+                defaults={"config": config_data["config"]},
             )
 
     VALID_AUTO_ADMIN_VALUES = ("all", "manual")
@@ -681,12 +688,16 @@ class ServiceSubscriptionSerializer(serializers.ModelSerializer):
 
         self._validate_proconnect_subscription(attrs)
 
-        service_type = self._get_service_type()
-        if service_type:
+        service = self._get_service()
+        if service:
             existing_metadata = instance.metadata if instance else {}
             self._validate_extended_admin_subscription(
-                attrs, service_type, existing_metadata
+                attrs, service.type, existing_metadata
             )
+        # Validate entitlement types here (at is_valid time) so an invalid type is
+        # rejected before the subscription is saved — otherwise the save's
+        # ProConnect push would fire and then get rolled back, drifting the provider.
+        self._validate_entitlement_types(service)
 
         return attrs
 
@@ -731,6 +742,9 @@ class OrganizationSerializer(serializers.ModelSerializer):
     service_subscriptions = ServiceSubscriptionWithServiceSerializer(
         many=True, read_only=True
     )
+    # Sent as the raw {requested, manual, dpnt, candidates, discarded} buckets;
+    # the frontend derives the per-domain view and the routable set from these.
+    proconnect_domains = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = models.Organization
@@ -753,9 +767,26 @@ class OrganizationSerializer(serializers.ModelSerializer):
             "telephone",
             "rpnt",
             "service_public_url",
+            "proconnect_domains",
             "service_subscriptions",
         ]
         read_only_fields = fields
+
+    def get_proconnect_domains(self, instance):
+        """Normalized {requested, manual, dpnt, candidates, discarded} buckets.
+
+        Opportunistically adds ``_prevalidated`` — the subset of the org's domains
+        already in the *deployed* ProConnect allowlist (from the cache filled by
+        ``proconnect_fetch_prevalidated``) — when that allowlist is known for the
+        operator's idp(s). Absent key = "pre-validation unknown".
+        """
+        buckets = proconnect_service.proconnect_domains(instance)
+        prevalidated = proconnect_service.prevalidated_org_domains(
+            instance, buckets, self.context.get("prevalidated_sets")
+        )
+        if prevalidated is not None:
+            buckets["_prevalidated"] = prevalidated
+        return buckets
 
     def to_representation(self, instance):
         """Convert the representation to the desired format."""

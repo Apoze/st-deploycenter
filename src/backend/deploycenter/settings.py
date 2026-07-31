@@ -274,6 +274,51 @@ class Base(Configuration):
         None, environ_name="FRONTEND_THEME", environ_prefix=None
     )
 
+    # ProConnect "api-partenaires": push of authorized fqdns to OIDC providers.
+    # The secret is global to all /api/oidc_providers/* routes (not per-provider);
+    # per-provider access is enforced by the api-partenaires allowlist on their side.
+    PROCONNECT_API_PARTENAIRES_URL = values.Value(
+        None,
+        environ_name="PROCONNECT_API_PARTENAIRES_URL",
+        environ_prefix=None,
+    )
+    PROCONNECT_API_PARTENAIRES_SECRET = values.Value(
+        None,
+        environ_name="PROCONNECT_API_PARTENAIRES_SECRET",
+        environ_prefix=None,
+    )
+    # Optional SOCKS5 proxy for api-partenaires calls (to egress from a fixed IP),
+    # e.g. "socks5://user:pass@proxy-host:1080". Empty = direct connection.
+    PROCONNECT_API_PARTENAIRES_PROXY_URL = values.Value(
+        None,
+        environ_name="PROCONNECT_API_PARTENAIRES_PROXY_URL",
+        environ_prefix=None,
+    )
+    # Webhooks fired when an operator requests a new ProConnect domain (the "ask"
+    # bucket). Same config format as service webhooks; provided as a JSON list in
+    # the env var. There is no natural per-org/per-service DB home for this
+    # notification, so it is configured statically here.
+    PROCONNECT_REQUESTED_DOMAIN_WEBHOOKS = values.Value(
+        [],
+        environ_name="PROCONNECT_REQUESTED_DOMAIN_WEBHOOKS",
+        environ_prefix=None,
+    )
+    # Deployed ProConnect allowlist (per-idp allowed fqdns), fetched from the
+    # api-partenaires repo by `proconnect_fetch_prevalidated` and cached, so the UI
+    # can show which of an org's domains are already pre-validated (routable now) vs
+    # pending the allowlist deploy.
+    PROCONNECT_DOMAIN_ALLOWLIST_URL = values.Value(
+        "https://raw.githubusercontent.com/proconnect-gouv/api-partenaires/"
+        "refs/heads/main/config/anct/oidc_providers.production.yaml",
+        environ_name="PROCONNECT_DOMAIN_ALLOWLIST_URL",
+        environ_prefix=None,
+    )
+    PROCONNECT_DOMAIN_ALLOWLIST_CACHE_TTL = values.IntegerValue(
+        4 * 3600,  # 4 hours
+        environ_name="PROCONNECT_DOMAIN_ALLOWLIST_CACHE_TTL",
+        environ_prefix=None,
+    )
+
     # Posthog
     POSTHOG_KEY = values.Value(None, environ_name="POSTHOG_KEY", environ_prefix=None)
     POSTHOG_HOST = values.Value(

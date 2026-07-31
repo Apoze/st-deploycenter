@@ -15,6 +15,7 @@ import {
   Account,
   getOperatorServices,
   updateOperatorOrganizationRole,
+  updateOrganizationProconnectDomains,
 } from "@/features/api/Repository";
 import { getOrganization } from "@/features/api/Repository";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -352,6 +353,32 @@ export const useMutationUpdateOperatorOrganizationRole = () => {
       organizationId: string;
       data: { operator_admins_have_admin_role: boolean };
     }) => updateOperatorOrganizationRole(operatorId, organizationId, data),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: [
+          "operators",
+          variables.operatorId,
+          "organizations",
+          variables.organizationId,
+        ],
+      });
+    },
+  });
+};
+
+export const useMutationUpdateOrganizationProconnectDomains = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      operatorId,
+      organizationId,
+      payload,
+    }: {
+      operatorId: string;
+      organizationId: string;
+      payload: { manual?: string[]; requested?: string[]; discarded?: string[] };
+    }) =>
+      updateOrganizationProconnectDomains(operatorId, organizationId, payload),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({
         queryKey: [

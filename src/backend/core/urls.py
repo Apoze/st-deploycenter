@@ -17,6 +17,7 @@ from .api.viewsets.lagaufre import LagaufreViewSet
 from .api.viewsets.metrics import SubscriptionsByServiceView
 from .api.viewsets.operator import OperatorViewSet
 from .api.viewsets.organization import OperatorOrganizationViewSet
+from .api.viewsets.proconnect import ProConnectAllowlistView
 from .api.viewsets.service import (
     OrganizationServiceSubscriptionEntitlementViewSet,
     OrganizationServiceSubscriptionViewSet,
@@ -76,6 +77,11 @@ urlpatterns = [
                 ),
                 *account_router.urls,
                 path("config/", ConfigView.as_view(), name="api-config"),
+                path(
+                    "proconnect/oidc_providers.yaml",
+                    ProConnectAllowlistView.as_view(),
+                    name="api-proconnect-allowlist",
+                ),
                 path(
                     "metrics/subscriptions-by-service/",
                     SubscriptionsByServiceView.as_view(),

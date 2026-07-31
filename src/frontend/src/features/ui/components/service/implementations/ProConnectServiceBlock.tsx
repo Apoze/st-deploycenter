@@ -15,99 +15,86 @@ import {
 } from "@openfun/cunningham-react";
 import { ServiceAttribute } from "../ServiceAttribute";
 import { Icon, IconSize } from "@gouvfr-lasuite/ui-kit";
-import { DomainSelectorModal } from "../DomainSelectorModal";
+import { DomainMultiSelectModal } from "../DomainMultiSelectModal";
 import { MutateOptions } from "@tanstack/react-query";
 
 /**
- * Helper function to get ProConnect message and icon based on organization and subscription state
+ * ProConnect status message. Same for every user; superusers just additionally
+ * get the domain editor (an action button), not a different message.
  */
 
 type ProConnectMessage = {
   text?: React.ReactNode;
-  alert?:React.ReactNode,
-  icon?: string,
-  disabled?: boolean
+  alert?: React.ReactNode;
+  icon?: string;
+  disabled?: boolean;
 };
+
+const RPNT_REFERENTIEL_URL =
+  "https://suiteterritoriale.anct.gouv.fr/conformite/referentiel";
 
 const getProConnectMessage = (
   organization: Organization,
   subscriptionDomains: string[] | null,
   isActive: boolean
 ): ProConnectMessage => {
-
-  const emailSetupMessage = <>Vous devez probablement raccorder ce domaine au fournisseur de messagerie, puis <a href="https://suiteterritoriale.anct.gouv.fr/conformite/referentiel#2.1" target="_blank" rel="noopener noreferrer">déclarer le nouvel email de contact.</a></>;
-
-  // Show active subscription message if subscription is active
-  if (subscriptionDomains && subscriptionDomains.length > 0) {
-
-    const domainsList = subscriptionDomains.map((domain, idx) => <>{!!idx && <span>, </span>}<b>{domain}</b></>);
-    if (isActive) {
-      const message: ProConnectMessage = {};
-      if (subscriptionDomains.length === 1) {
-        message.text = <span>Le domaine {domainsList} est actuellement routé vers ce FI.</span>;
-      } else {
-        message.text = <span>Les domaines {domainsList} sont actuellement routés vers ce FI.</span>;
-      }
-
-      // If the domain is unknown to the RPNT, ask for declaration
-      if (organization.type != "other") {
-        if (organization.mail_domain_status !== MailDomainStatus.VALID || subscriptionDomains[0] != organization.mail_domain) {
-          message.alert = <span>Le domaine {domainsList} n&apos;est pas présent dans l&apos;adresse de messagerie déclarée sur Service-Public.gouv.fr. Vous devez la <a href="https://suiteterritoriale.anct.gouv.fr/conformite/referentiel#2.1" target="_blank" rel="noopener noreferrer">mettre à jour</a> pour assurer la conformité au RPNT.</span>;
-          message.icon = "warning";
-        }
-      }
-
-      return message;
-
-    // Manage the case where sub is inactive and we had previous domain(s) that are not the single one we can
-    // add here automatically.
-    } else if (!(subscriptionDomains.length == 1 && subscriptionDomains[0] === organization.mail_domain)) {
-      if (subscriptionDomains.length === 1) {
-        return {
-          alert: <span>Le domaine {domainsList} était précédemment utilisé pour ProConnect.<br/> Veuillez contacter le support ANCT pour effectuer une migration.</span>,
-          icon: "warning",
-          disabled: true,
-        };
-      } else {
-        return {
-          alert: <span>Les domaines {domainsList} étaient précédemment utilisés pour ProConnect.<br/> Veuillez contacter le support ANCT pour effectuer une migration.</span>,
-          icon: "warning",
-          disabled: true,
-        };
-      }
+  // Active subscription: the selected domains are routed to the FI.
+  if (isActive && subscriptionDomains && subscriptionDomains.length > 0) {
+    const plural = subscriptionDomains.length > 1;
+    const message: ProConnectMessage = {
+      text: (
+        <span>
+          {plural ? "Les domaines " : "Le domaine "}
+          <b>{subscriptionDomains.join(", ")}</b>
+          {plural ? " sont routés" : " est routé"} vers ce FI.
+        </span>
+      ),
+    };
+    const conformant =
+      organization.type === "other" ||
+      (organization.mail_domain_status === MailDomainStatus.VALID &&
+        subscriptionDomains[0] === organization.mail_domain);
+    if (!conformant) {
+      message.alert = (
+        <span>
+          Ce domaine n&apos;est pas déclaré sur Service-Public.gouv.fr.{" "}
+          <a href={`${RPNT_REFERENTIEL_URL}#2.1`} target="_blank" rel="noopener noreferrer">
+            Mettez-le à jour
+          </a>{" "}
+          pour assurer la conformité au RPNT.
+        </span>
+      );
+      message.icon = "warning";
     }
+    return message;
   }
 
-  // Use the server-computed status to determine the appropriate message
-  switch (organization.mail_domain_status) {
-    case MailDomainStatus.NEED_EMAIL_SETUP:
-      return {
-        text: <span>Le domaine <b>{organization.mail_domain}</b>, actuellement utilisé pour le site internet, sera routé vers ce FI.</span>,
-        alert: <span>
-          {emailSetupMessage}
-          <br/>Si ce domaine ne convient pas, veuillez contacter le support ANCT.
-        </span>,
-        icon: "info"
-      };
-    case MailDomainStatus.INVALID:
-      return {
-        alert: <span>Aucun nom de domaine valide n&apos;est connu. Vous devez d&apos;abord en <a href="https://suiteterritoriale.anct.gouv.fr/conformite/referentiel#1.1" target="_blank" rel="noopener noreferrer">déclarer un</a>.</span>,
-        icon: "warning",
-        disabled: true,
-      };
-    case MailDomainStatus.VALID:
-      return {
-        text: <span>Le domaine <b>{organization.mail_domain}</b> sera routé vers ce FI.</span>,
-        alert: <span>Si ce domaine ne convient pas, veuillez contacter le support ANCT.</span>,
-        icon: "info"
-      };
-    default:
-      return {
-        alert: <span>Situation inconnue. Veuillez contacter le support ANCT.</span>,
-        icon: "warning",
-        disabled: true,
-      };
+  // No usable domain: one must be declared before activation.
+  if (organization.mail_domain_status === MailDomainStatus.INVALID) {
+    return {
+      alert: (
+        <span>
+          Aucun nom de domaine valide n&apos;est connu. Vous devez d&apos;abord en{" "}
+          <a href={`${RPNT_REFERENTIEL_URL}#1.1`} target="_blank" rel="noopener noreferrer">
+            déclarer un
+          </a>
+          .
+        </span>
+      ),
+      icon: "warning",
+      disabled: true,
+    };
   }
+
+  // A valid domain is available and will be routed on activation.
+  return {
+    text: (
+      <span>
+        Le domaine <b>{organization.mail_domain}</b> sera routé vers ce FI.
+      </span>
+    ),
+    icon: "info",
+  };
 };
 
 /**
@@ -154,17 +141,6 @@ export const ProConnectServiceBlock = (props: {
     );
   };
 
-  // Check if subscription is less than 48 hours old
-  const isSubscriptionLessThan48Hours = useMemo(() => {
-    if (!subscription?.created_at) {
-      return false;
-    }
-    const createdAt = new Date(subscription.created_at);
-    const now = new Date();
-    const diffInHours = (now.getTime() - createdAt.getTime()) / (1000 * 60 * 60);
-    return diffInHours < 48;
-  }, [subscription?.created_at]);
-
   const message = getProConnectMessage(
     props.organization,
     subscriptionDomains,
@@ -200,48 +176,40 @@ export const ProConnectServiceBlock = (props: {
           <form>
             <div className="dc__service__attribute__container">
 
-              {isSuperUser && (
-                <>
-                  {domainModal.isOpen && (
-                    <DomainSelectorModal
-                      {...domainModal}
-                      domains={domains}
-                      isSuperUser={isSuperUser}
-                      onSave={handleDomainsChange}
-                    />
-                  )}
-                  <ServiceAttribute
-                    name="Domaines"
-                    interactive={!blockProps.isManagedByOtherOperator}
-                    onClick={() => domainModal.open()}
-                    value={
-                      domains.length > 0
-                        ? <span className="dc__domains-list">
-                            {domains.map((domain) => (
-                              <span key={domain}>{domain}</span>
-                            ))}
-                          </span>
-                        : "Aucun"
-                    }
-                  />
-                </>
+              {domainModal.isOpen && (
+                <DomainMultiSelectModal
+                  {...domainModal}
+                  organization={props.organization}
+                  instanceName={props.service.instance_name}
+                  idpId={props.service.config?.idp_id}
+                  isActive={subscription?.is_active ?? false}
+                  selected={domains}
+                  onSave={handleDomainsChange}
+                />
               )}
+              <ServiceAttribute
+                name="Domaines"
+                interactive={!blockProps.isManagedByOtherOperator}
+                onClick={() => domainModal.open()}
+                value={
+                  domains.length > 0
+                    ? <span className="dc__domains-list">
+                        {domains.map((domain) => (
+                          <span key={domain}>{domain}</span>
+                        ))}
+                      </span>
+                    : "Aucun"
+                }
+              />
 
-              {!isSuperUser && message.text && <ServiceAttribute>
+              {message.text && <ServiceAttribute>
                 <div className="dc__service__attribute_text">{message.text}</div>
               </ServiceAttribute>}
 
-              {!isSuperUser && message.alert && message.icon && <div className={message.icon == "warning" ? "dc__service__warning" : "dc__service__info"}>
+              {message.alert && message.icon && <div className={message.icon == "warning" ? "dc__service__warning" : "dc__service__info"}>
                   <Icon name={message.icon} size={IconSize.SMALL} />
                   {message.alert}
               </div>}
-
-              {isSubscriptionLessThan48Hours && subscription?.is_active && (
-                <div className="dc__service__info">
-                  <Icon name="info" size={IconSize.SMALL} />
-                  L&apos;activation de ProConnect peut prendre jusqu&apos;à 48 heures
-                </div>
-              )}
 
             </div>
           </form>

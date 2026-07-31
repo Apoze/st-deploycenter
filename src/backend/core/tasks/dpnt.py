@@ -24,6 +24,7 @@ from ..models import (
     ServiceSubscription,
 )
 from ..services import get_service_handler
+from ..services.proconnect import org_rpnt_valid_domains, update_proconnect_domains
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,18 @@ def import_dpnt_dataset(self, force_update: bool = True, max_rows: int = None): 
                 )
                 continue
 
+            # Cache the DILA/RPNT-valid domains in the "dpnt" bucket. Computed from a
+            # transient instance so it reflects this import's rpnt/website/email.
+            dpnt_domains = sorted(
+                org_rpnt_valid_domains(
+                    Organization(
+                        rpnt=org_data.get("rpnt"),
+                        site_internet=org_data.get("site_internet"),
+                        adresse_messagerie=org_data.get("adresse_messagerie"),
+                    )
+                )
+            )
+
             # Remove None values
             org_data = {k: v for k, v in org_data.items() if v is not None}
 
@@ -120,15 +133,22 @@ def import_dpnt_dataset(self, force_update: bool = True, max_rows: int = None): 
                     ).first()
 
                 if existing_org and force_update:
-                    # Update existing organization
+                    # Update existing organization. Save the DPNT fields, then merge
+                    # the "dpnt" bucket via a row-locked update so a concurrent
+                    # superuser edit of another bucket is not clobbered.
                     for field, value in org_data.items():
                         setattr(existing_org, field, value)
-                    existing_org.save()
+                    existing_org.save(
+                        update_fields=list(org_data.keys()) + ["updated_at"]
+                    )
+                    update_proconnect_domains(existing_org, dpnt=dpnt_domains)
                     stats["updated"] += 1
                     logger.debug("Updated organization: %s", existing_org.name)
                 elif not existing_org:
                     # Create new organization
-                    Organization.objects.create(**org_data)
+                    Organization.objects.create(
+                        **org_data, proconnect_domains={"dpnt": dpnt_domains}
+                    )
                     stats["created"] += 1
                     logger.debug("Created organization: %s", org_data["name"])
                 else:
@@ -179,6 +199,12 @@ def _create_service_subscriptions(operator, service_id, org_ids, valid_services)
         service_id=service_id, organization_id__in=org_ids
     ).count()
 
+    # NOTE: bulk_create emits no post_save signal, so it bypasses the synchronous
+    # ProConnect fqdns push (see core/signals.py::_sync_proconnect). That is fine
+    # here because this only seeds subscription rows; the provider is reconciled
+    # separately by the `proconnect_sync` cron. If this ever creates *active*
+    # proconnect subscriptions with routed domains, call sync_proconnect_provider()
+    # for the affected idps afterwards or the provider will silently drift.
     ServiceSubscription.objects.bulk_create(new_sub_objects, ignore_conflicts=True)
 
     count_after = ServiceSubscription.objects.filter(

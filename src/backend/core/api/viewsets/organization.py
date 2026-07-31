@@ -4,6 +4,8 @@ API endpoints for Organization model.
 
 import logging
 
+from django.contrib.admin.models import CHANGE, LogEntry
+from django.contrib.contenttypes.models import ContentType
 from django.db.models import Prefetch
 
 from rest_framework import filters, viewsets
@@ -14,6 +16,8 @@ from rest_framework.settings import api_settings
 
 from core import models
 from core.authentication import OperatorExternalManagementApiKeyAuthentication
+from core.services import proconnect as proconnect_service
+from core.webhooks import send_domain_requested_webhooks
 
 from .. import permissions, serializers
 
@@ -130,6 +134,17 @@ class OperatorOrganizationViewSet(viewsets.ReadOnlyModelViewSet):
             )
         return queryset
 
+    def get_serializer_context(self):
+        """Precompute the operator's deployed ProConnect allowlist once (not per org).
+
+        Feeds ``OrganizationSerializer._prevalidated`` without an N+1 of cache reads.
+        """
+        context = super().get_serializer_context()
+        context["prevalidated_sets"] = proconnect_service.operator_prevalidated_sets(
+            self.kwargs.get("operator_id")
+        )
+        return context
+
     @action(detail=True, methods=["patch"], url_path="operator-role")
     def operator_role(self, request, *args, **kwargs):
         """Update the OperatorOrganizationRole settings for this org+operator."""
@@ -170,4 +185,95 @@ class OperatorOrganizationViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(
             {"operator_admins_have_admin_role": role.operator_admins_have_admin_role}
+        )
+
+    @staticmethod
+    def _normalize_domains(value, field):
+        """Validate/normalize a list of domain strings (lowercase, deduped, sorted)."""
+        if not isinstance(value, list) or not all(
+            isinstance(d, str) for d in value
+        ):
+            raise drf_serializers.ValidationError(
+                {field: "Must be a list of domain strings."}
+            )
+        return sorted({d.strip().lower() for d in value if d.strip() and "." in d})
+
+    @action(detail=True, methods=["patch"], url_path="proconnect-domains")
+    def proconnect_domains(self, request, *args, **kwargs):
+        """Update the organization's ProConnect domain buckets.
+
+        Body may contain "manual", "requested" and/or "discarded" lists (partial):
+        - "requested": any operator member — domains requested for a superuser to
+          validate (i.e. move to "manual").
+        - "manual" / "discarded": superuser only.
+
+        The system-managed buckets ("dpnt", "candidates") are preserved.
+        Each change is recorded as an admin LogEntry on the organization.
+        """
+        organization = self.get_object()
+        # request.user may be None for external-API-key auth (no superuser powers).
+        is_superuser = bool(getattr(request.user, "is_superuser", False))
+
+        # "requested" is open to any operator member; the rest are superuser-only.
+        superuser_fields = {"manual", "discarded"} & set(request.data)
+        if superuser_fields and not is_superuser:
+            return Response(
+                {"detail": "Only superusers can edit validated/discarded domains."},
+                status=403,
+            )
+
+        overrides = {
+            field: self._normalize_domains(request.data[field], field)
+            for field in ("manual", "requested", "discarded")
+            if field in request.data
+        }
+        # Row-locked merge: never clobber a concurrent cron write of another bucket.
+        previous, new_value = proconnect_service.update_proconnect_domains(
+            organization, **overrides
+        )
+
+        self._log_domain_changes(request, organization, previous, new_value)
+
+        # Notify (statically-configured webhooks) about newly requested domains.
+        added_requested = sorted(
+            set(new_value["requested"]) - set(previous["requested"])
+        )
+        if added_requested:
+            operator = models.Operator.objects.filter(
+                id=self.kwargs.get("operator_id")
+            ).first()
+            send_domain_requested_webhooks(
+                organization, operator, request.user, added_requested
+            )
+
+        return Response(new_value)
+
+    @staticmethod
+    def _log_domain_changes(request, organization, previous, new_value):
+        """Record an admin LogEntry per added/removed domain (viewable in org history)."""
+        messages = []
+        for bucket in ("manual", "requested", "discarded"):
+            before, after = set(previous[bucket]), set(new_value[bucket])
+            for domain in sorted(after - before):
+                messages.append(f"added {domain} to {bucket}")
+            for domain in sorted(before - after):
+                messages.append(f"removed {domain} from {bucket}")
+        if not messages:
+            return
+
+        change_message = "ProConnect domains: " + "; ".join(messages)
+        user_id = getattr(request.user, "pk", None)
+        logger.info(
+            "%s for org=%s by user=%s", change_message, organization.pk, user_id
+        )
+        # An admin LogEntry needs a user; skip it for external-API-key (no user).
+        if user_id is None:
+            return
+        LogEntry.objects.log_action(
+            user_id=user_id,
+            content_type_id=ContentType.objects.get_for_model(organization).pk,
+            object_id=organization.pk,
+            object_repr=str(organization)[:200],
+            action_flag=CHANGE,
+            change_message=change_message,
         )

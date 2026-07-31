@@ -903,6 +903,7 @@ class OrganizationAdmin(admin.ModelAdmin):
                     "telephone",
                     "rpnt",
                     "service_public_url",
+                    "proconnect_domains",
                 )
             },
         ),

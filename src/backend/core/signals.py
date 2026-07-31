@@ -5,7 +5,7 @@ import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-from django.db.models.signals import post_delete, post_save
+from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
 
 from core.models import Account, AccountServiceLink, ServiceSubscription
@@ -19,6 +19,12 @@ _request_user: ContextVar = ContextVar("request_user", default=None)
 # Context variable to temporarily suppress account webhook signals
 _suppress_account_webhooks: ContextVar = ContextVar(
     "suppress_account_webhooks", default=False
+)
+
+# Context variable to temporarily suppress the synchronous ProConnect fqdns push
+# (e.g. bulk/programmatic subscription writes that shouldn't sync per-row).
+_suppress_proconnect_sync: ContextVar = ContextVar(
+    "suppress_proconnect_sync", default=False
 )
 
 
@@ -42,9 +48,90 @@ def suppress_account_webhooks():
         _suppress_account_webhooks.reset(token)
 
 
+@contextmanager
+def suppress_proconnect_sync():
+    """Temporarily suppress the synchronous ProConnect fqdns push from signals."""
+    token = _suppress_proconnect_sync.set(True)
+    try:
+        yield
+    finally:
+        _suppress_proconnect_sync.reset(token)
+
+
 def get_request_user():
     """Retrieve the current request user from context variable."""
     return _request_user.get()
+
+
+def _subscription_fqdn_contribution(subscription):
+    """The fqdns this subscription contributes to its provider's pushed set.
+
+    That is the (normalized) routed domains when active, or nothing when inactive
+    — exactly what :func:`compute_idp_fqdns` unions. Used to decide whether a save
+    actually changes the pushed set (and thus needs a re-push).
+    """
+    if not subscription.is_active:
+        return frozenset()
+    domains = (subscription.metadata or {}).get("domains") or []
+    return frozenset(
+        d.strip().lower() for d in domains if isinstance(d, str) and d.strip()
+    )
+
+
+@receiver(pre_save, sender=ServiceSubscription)
+def capture_proconnect_change(sender, instance, **kwargs):
+    """Record whether this save changes the subscription's ProConnect fqdn contribution.
+
+    Lets :func:`_sync_proconnect` skip the api-partenaires push when a save touches
+    neither ``is_active`` nor the domain list (e.g. an unrelated metadata edit).
+    """
+    if instance.service.type != "proconnect":
+        return
+    # Stash a transient flag on the instance for the post_save handler to read.
+    # pylint: disable=protected-access
+    if instance._state.adding or instance.pk is None:
+        instance._proconnect_needs_sync = True
+        return
+    old = ServiceSubscription.objects.filter(pk=instance.pk).first()
+    instance._proconnect_needs_sync = old is None or (
+        _subscription_fqdn_contribution(old)
+        != _subscription_fqdn_contribution(instance)
+    )
+
+
+def _sync_proconnect(instance, service):
+    """Push the provider's full fqdn list to api-partenaires, synchronously.
+
+    Runs inside the request's transaction so that a push failure raises and rolls
+    back the subscription change (keeping local DB and the provider in sync). The
+    API user then gets a sync error instead of a silent drift.
+
+    Skips the push when the save did not change the pushed fqdn set (per the
+    ``_proconnect_needs_sync`` flag set in :func:`capture_proconnect_change`).
+    Deletes have no flag and always push (a contribution is being removed).
+
+    FOOTGUN: this fires from ``post_save`` / ``post_delete`` signals, which Django
+    does NOT emit for bulk operations — ``QuerySet.bulk_create``,
+    ``QuerySet.update``, ``QuerySet.delete`` all bypass it. Any code that mutates
+    proconnect ``ServiceSubscription`` rows in bulk (e.g. ``core/tasks/dpnt.py``)
+    will NOT push and must reconcile the provider explicitly afterwards by calling
+    ``sync_proconnect_provider(idp_id)`` (or running the ``proconnect_sync``
+    command). Rollback-on-failure only holds on the request paths that open a
+    transaction (the ``@transaction.atomic`` subscription viewset methods); a bare
+    ``instance.save()`` in autocommit commits first, then pushes — the inverse of
+    rollback. Prefer the viewset/serializer path for one-off writes.
+    """
+    if service.type != "proconnect" or _suppress_proconnect_sync.get():
+        return
+    if not getattr(instance, "_proconnect_needs_sync", True):
+        return
+
+    # Local import to avoid an import cycle at module load.
+    from core.services.proconnect import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+        sync_proconnect_provider_for_subscription,
+    )
+
+    sync_proconnect_provider_for_subscription(instance, raise_on_error=True)
 
 
 def _mask_email(email):
@@ -109,6 +196,8 @@ def handle_subscription_save(sender, instance, created, **kwargs):
     else:
         logger.debug("No webhook configurations found for service %s", service.name)
 
+    _sync_proconnect(instance, service)
+
 
 @receiver(post_delete, sender=ServiceSubscription)
 def handle_subscription_delete(sender, instance, **kwargs):
@@ -157,6 +246,8 @@ def handle_subscription_delete(sender, instance, **kwargs):
                 )
     else:
         logger.debug("No webhook configurations found for service %s", service.name)
+
+    _sync_proconnect(instance, service)
 
 
 def send_account_webhooks(account, service_ids_override=None):

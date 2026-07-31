@@ -47,6 +47,23 @@ export type Organization = {
   adresse_messagerie: string | null;
   site_internet: string | null;
   telephone: string | null;
+  // ProConnect domain buckets by source. "requested" = pending requests,
+  // "manual" = superuser-validated, "dpnt" = DILA cache, "candidates" =
+  // pre-generated, "discarded" = superuser tombstone. (What is currently live is
+  // "routed" — derived per-idp from subscription metadata, not a bucket here.)
+  proconnect_domains: {
+    requested: string[];
+    manual: string[];
+    dpnt: string[];
+    candidates: string[];
+    discarded: string[];
+    // Per-idp pre-validation: {idp_id: [domains already in that provider's deployed
+    // allowlist]}. An idp present here (even with []) means its allowlist is known;
+    // a domain not listed for it is "not yet pre-validated"; an idp absent (or the
+    // whole key absent) means "pre-validation unknown". (Filled per-idp because the
+    // same domain can be deployed on one provider and pending on another.)
+    _prevalidated?: Record<string, string[]>;
+  };
   operator_admins_have_admin_role?: boolean;
 };
 
@@ -228,6 +245,18 @@ export const updateOperatorOrganizationRole = async (
     { method: "PATCH", body: JSON.stringify(data) }
   );
   return (await response.json()) as { operator_admins_have_admin_role: boolean };
+};
+
+export const updateOrganizationProconnectDomains = async (
+  operatorId: string,
+  organizationId: string,
+  payload: { manual?: string[]; requested?: string[]; discarded?: string[] }
+): Promise<Organization["proconnect_domains"]> => {
+  const response = await fetchAPI(
+    `operators/${operatorId}/organizations/${organizationId}/proconnect-domains/`,
+    { method: "PATCH", body: JSON.stringify(payload) }
+  );
+  return (await response.json()) as Organization["proconnect_domains"];
 };
 
 export const getOrganizationServices = async (

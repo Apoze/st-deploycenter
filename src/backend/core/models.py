@@ -560,6 +560,15 @@ class Organization(BaseModel):
         help_text=_("URL of the associated page on Service-Public.fr"),
     )
 
+    # Raw storage for per-org ProConnect domain buckets ({source: [domains]}).
+    # All logic lives in core.services.proconnect
+    proconnect_domains = models.JSONField(
+        _("ProConnect domains"),
+        default=dict,
+        blank=True,
+        help_text=_("ProConnect domain buckets by source"),
+    )
+
     # Relationships
     operators = models.ManyToManyField(
         Operator,
