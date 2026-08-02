@@ -2,3 +2,7 @@
   display: flex;
   gap: 16px;
 }
+
+.dc__service__attribute__modal__content__storage-picker__error {
+  color: var(--c--theme--colors--danger-600);
+}

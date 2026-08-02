@@ -126,7 +126,7 @@ export const useMutationUpdateOrganizationServiceSubscription = () => {
       );
     },
     onSuccess: (data, variables) => {
-      queryClient.invalidateQueries({
+      return queryClient.invalidateQueries({
         queryKey: [
           "operators",
           variables.operatorId,

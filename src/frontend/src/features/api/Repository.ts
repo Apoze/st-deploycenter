@@ -73,7 +73,7 @@ export type Entitlement = {
   type: string;
   config: Record<string, unknown>;
   account_type: string;
-  account_id: string;
+  account: string | null;
   id: string;
 };
 
