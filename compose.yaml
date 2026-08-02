@@ -87,6 +87,7 @@ services:
     user: ${DOCKER_USER:-1000}
     environment:
       - DJANGO_CONFIGURATION=DevelopmentMinimal
+      - ST_DEPLOYCENTER_SERVICE_AUTH_KEY
     env_file:
       - env.d/development/backend.defaults
       - env.d/development/backend.local
