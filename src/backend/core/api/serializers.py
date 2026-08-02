@@ -507,8 +507,7 @@ class ServiceSubscriptionSerializer(serializers.ModelSerializer):
                     not isinstance(value, bool)
                     and isinstance(value, (int, float))
                     and (not isinstance(value, float) or math.isfinite(value))
-                    and value >= 0
-                    and value <= self.MAX_SAFE_INTEGER
+                    and 0 <= value <= self.MAX_SAFE_INTEGER
                     and int(value) == value
                 )
                 if not valid:
