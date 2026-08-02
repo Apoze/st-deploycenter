@@ -1,5 +1,6 @@
 """Client serializers for the deploycenter core app."""
 
+import math
 from collections import defaultdict
 
 from django.db.models import Q
@@ -416,6 +417,8 @@ class EntitlementConfigInputSerializer(serializers.Serializer):
 class ServiceSubscriptionSerializer(serializers.ModelSerializer):
     """Serialize service subscriptions."""
 
+    MAX_SAFE_INTEGER = 9_007_199_254_740_991
+
     entitlements = EntitlementSerializer(many=True, read_only=True)
     # Write-only field for setting entitlement configs during create/update
     entitlements_input = EntitlementConfigInputSerializer(
@@ -452,8 +455,73 @@ class ServiceSubscriptionSerializer(serializers.ModelSerializer):
                 data=entitlements_data, many=True
             )
             entitlements_serializer.is_valid(raise_exception=True)
-            self._pending_entitlement_configs = entitlements_serializer.validated_data
+            self._pending_entitlement_configs = self._validate_entitlement_configs(
+                entitlements_serializer.validated_data
+            )
         return result
+
+    def _validate_entitlement_configs(self, entitlements):
+        """Validate default entitlement scopes and their configuration."""
+        service = self._get_service()
+        handler = get_service_handler(service) if service else None
+        defaults = (
+            {
+                (default["type"], default["account_type"]): default["config"]
+                for default in handler.get_default_entitlements()
+            }
+            if handler
+            else {}
+        )
+        valid_types = set(models.Entitlement.EntitlementType.values)
+        scopes = set()
+
+        for entitlement in entitlements:
+            scope = (entitlement["type"], entitlement["account_type"])
+            if scope in scopes:
+                raise serializers.ValidationError(
+                    {"entitlements": "Duplicate entitlement scope."}
+                )
+            scopes.add(scope)
+
+            if entitlement["type"] not in valid_types:
+                raise serializers.ValidationError(
+                    {"entitlements": "Unknown entitlement type."}
+                )
+            if defaults and scope not in defaults:
+                raise serializers.ValidationError(
+                    {
+                        "entitlements": "Entitlement scope is not supported by this service."
+                    }
+                )
+            if scope not in defaults:
+                continue
+
+            config = entitlement["config"]
+            if set(config) != set(defaults[scope]):
+                raise serializers.ValidationError(
+                    {"entitlements": "Invalid entitlement configuration keys."}
+                )
+            if "max_storage" in config:
+                value = config["max_storage"]
+                valid = (
+                    not isinstance(value, bool)
+                    and isinstance(value, (int, float))
+                    and (not isinstance(value, float) or math.isfinite(value))
+                    and 0 <= value <= self.MAX_SAFE_INTEGER
+                    and int(value) == value
+                )
+                if not valid:
+                    raise serializers.ValidationError(
+                        {
+                            "entitlements": (
+                                "max_storage must be a non-negative safe integer "
+                                "number of bytes."
+                            )
+                        }
+                    )
+                config["max_storage"] = int(value)
+
+        return entitlements
 
     def update(self, instance, validated_data):
         """Update subscription and apply entitlement configs."""
@@ -471,37 +539,10 @@ class ServiceSubscriptionSerializer(serializers.ModelSerializer):
         if not self._pending_entitlement_configs:
             return
 
-        # Get valid entitlement types for this service
-        handler = get_service_handler(subscription.service)
-        valid_types = set()
-        if handler:
-            valid_types = {d["type"] for d in handler.get_default_entitlements()}
-
         for config_data in self._pending_entitlement_configs:
             entitlement_type = config_data["type"]
             account_type = config_data["account_type"]
             config = config_data["config"]
-
-            # Validate entitlement type is appropriate for this service
-            # Only validate if the service has defined valid types (via handler)
-            if valid_types and entitlement_type not in valid_types:
-                raise serializers.ValidationError(
-                    {
-                        "entitlements": f"Entitlement type '{entitlement_type}' is not valid "
-                        f"for service type '{subscription.service.type}'. "
-                        f"Valid types: {', '.join(str(t) for t in valid_types)}"
-                    }
-                )
-
-            # Also validate the type is a valid EntitlementType enum value
-            valid_enum_types = [t.value for t in models.Entitlement.EntitlementType]
-            if entitlement_type not in valid_enum_types:
-                raise serializers.ValidationError(
-                    {
-                        "entitlements": f"Unknown entitlement type '{entitlement_type}'. "
-                        f"Valid types: {', '.join(valid_enum_types)}"
-                    }
-                )
 
             # Only update default entitlements (account=None), never account-specific ones
             # Use update_or_create for atomic operation

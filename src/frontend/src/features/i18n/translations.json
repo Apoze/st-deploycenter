@@ -74,9 +74,9 @@
                       "zero_value": "Illimité"
                     },
                     "organization": {
-                      "label": "Quota global",
+                      "label": "Quota de l’organisation",
                       "modal": {
-                        "title": "Quota global",
+                        "title": "Quota de l’organisation",
                         "description": "Modifier le quota de stockage pour tous les utilisateurs de l'organisation."
                       },
                       "zero_value": "Illimité"
@@ -157,7 +157,9 @@
             "fields": {
               "storage_picker": {
                 "input_placeholder": "Valeur",
-                "unit_placeholder": "Unité"
+                "unit_placeholder": "Unité",
+                "invalid_value": "Saisissez une valeur correspondant à un nombre entier d’octets.",
+                "invalid_persisted_value": "Valeur invalide"
               }
             }
           }

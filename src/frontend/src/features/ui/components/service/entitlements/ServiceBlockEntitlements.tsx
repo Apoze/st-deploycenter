@@ -7,7 +7,7 @@ import { StoragePickerEntitlementField } from "@/features/ui/components/service/
 
 /**
  * Get entitlements to display, using defaults if no subscription exists yet.
- * Returns entitlements grouped by priority (organization, account, accountOverride).
+ * Returns only editable default entitlements, grouped by scope.
  */
 const getEntitlementsByPriority = (
   entitlements: Entitlement[] | undefined,
@@ -16,19 +16,15 @@ const getEntitlementsByPriority = (
 ): Record<string, Entitlement | null> => {
   // If we have real entitlements, use them
   if (entitlements && entitlements.length > 0) {
-    const accountOverride = entitlements.find(
-      (e) => e.account_type !== "organization" && !!e.account_type && e.account_id
-    );
     const account = entitlements.find(
       (e) =>
-        e.account_type !== "organization" && !!e.account_type && !e.account_id
+        e.account_type !== "organization" && !!e.account_type && !e.account
     );
     const organization = entitlements.find(
-      (e) => e.account_type === "organization" && !e.account_id
+      (e) => e.account_type === "organization" && !e.account
     );
 
     return {
-      accountOverride: accountOverride || null,
       account: account || null,
       organization: organization || null,
     };
@@ -36,7 +32,6 @@ const getEntitlementsByPriority = (
 
   // No subscription yet - show defaults from service config
   const result: Record<string, Entitlement | null> = {
-    accountOverride: null,
     account: null,
     organization: null,
   };
@@ -52,7 +47,7 @@ const getEntitlementsByPriority = (
         id: "",
         type: defaultEnt.type,
         account_type: defaultEnt.account_type,
-        account_id: "",
+        account: null,
         config: { ...defaultEnt.config },
       };
     }

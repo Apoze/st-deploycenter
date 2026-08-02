@@ -1,7 +1,9 @@
 """Management command to create demo data for local development."""
 
+import os
+
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from core.models import (
     Operator,
@@ -9,9 +11,11 @@ from core.models import (
     OperatorServiceConfig,
     Organization,
     Service,
+    ServiceSubscription,
     User,
     UserOperatorRole,
 )
+from core.services import get_service_handler
 
 SERVICE_TYPES = [
     {
@@ -60,6 +64,10 @@ class Command(BaseCommand):
             )
             return
 
+        service_auth_key = os.environ.get("ST_DEPLOYCENTER_SERVICE_AUTH_KEY")
+        if not service_auth_key:
+            raise CommandError("ST_DEPLOYCENTER_SERVICE_AUTH_KEY must be set")
+
         # User
         user, created = User.objects.get_or_create(
             email="user1@example.local",
@@ -101,7 +109,7 @@ class Command(BaseCommand):
             )
 
         # Organization
-        organization, created = Organization.objects.get_or_create(
+        organization, created = Organization.objects.update_or_create(
             siret="00000000000001",
             defaults={
                 "name": "Commune de Demo",
@@ -144,6 +152,16 @@ class Command(BaseCommand):
                     "maturity": "stable",
                 },
             )
+            if service.type == "drive":
+                service.name = svc["name"]
+                service.url = svc["url"]
+                service.config = {
+                    **(service.config or {}),
+                    "entitlements_api_key": service_auth_key,
+                }
+                service.is_active = True
+                service.maturity = "stable"
+                service.save()
             if created:
                 self.stdout.write(
                     self.style.SUCCESS(
@@ -164,6 +182,29 @@ class Command(BaseCommand):
             if created:
                 self.stdout.write(
                     self.style.SUCCESS(f"Linked {operator.name} to {service.name}")
+                )
+
+            if service.type == "drive":
+                subscription, _ = ServiceSubscription.objects.update_or_create(
+                    organization=organization,
+                    service=service,
+                    defaults={"operator": operator, "is_active": True},
+                )
+                defaults = get_service_handler(service).get_default_entitlements()
+                for entitlement in defaults:
+                    subscription.entitlements.update_or_create(
+                        type=entitlement["type"],
+                        account_type=entitlement["account_type"],
+                        account=None,
+                        defaults={"config": entitlement["config"].copy()},
+                    )
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        "Drive quota bootstrap ready: "
+                        f"service_id={service.id} "
+                        f"organization_siret={organization.siret} "
+                        f"entitlements={len(defaults)} subscription=active"
+                    )
                 )
 
         self.stdout.write(self.style.SUCCESS("\nDemo data ready!"))

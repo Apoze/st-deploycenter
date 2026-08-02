@@ -11,6 +11,28 @@ from core.tests.utils import assert_equals_partial
 pytestmark = pytest.mark.django_db
 
 
+def _drive_subscription_api():
+    """Return an authorized client and an existing Drive subscription endpoint."""
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+    operator = factories.OperatorFactory()
+    factories.UserOperatorRoleFactory(user=user, operator=operator)
+    organization = factories.OrganizationFactory()
+    factories.OperatorOrganizationRoleFactory(
+        operator=operator, organization=organization
+    )
+    service = factories.ServiceFactory(type="drive")
+    subscription = factories.ServiceSubscriptionFactory(
+        organization=organization, service=service, operator=operator
+    )
+    url = (
+        f"/api/v1.0/operators/{operator.id}/organizations/{organization.id}/"
+        f"services/{service.id}/subscription/"
+    )
+    return client, subscription, url
+
+
 def test_api_subscription_entitlements_anonymous():
     """Anonymous users should not be able to list entitlements."""
     user = factories.UserFactory()
@@ -571,6 +593,151 @@ def test_api_subscription_update_with_entitlements():
     assert data["entitlements"][0]["config"]["max_storage"] == 9999
 
 
+@pytest.mark.parametrize(
+    ("account_type", "max_storage"),
+    [("user", 0), ("organization", 1_500_000.0)],
+)
+def test_api_drive_subscription_updates_default_quotas(account_type, max_storage):
+    """Drive quota updates persist zero and integer-valued JSON numbers as bytes."""
+    client, subscription, url = _drive_subscription_api()
+
+    response = client.patch(
+        url,
+        {
+            "entitlements": [
+                {
+                    "type": models.Entitlement.EntitlementType.DRIVE_STORAGE,
+                    "account_type": account_type,
+                    "config": {"max_storage": max_storage},
+                }
+            ]
+        },
+        format="json",
+    )
+
+    assert response.status_code == 200
+    persisted = subscription.entitlements.get(
+        type=models.Entitlement.EntitlementType.DRIVE_STORAGE,
+        account_type=account_type,
+        account=None,
+    ).config["max_storage"]
+    assert persisted == int(max_storage)
+    assert isinstance(persisted, int)
+
+
+@pytest.mark.parametrize(
+    "max_storage",
+    [True, "1000", -1, 1.5, 9_007_199_254_740_992],
+)
+def test_api_drive_subscription_rejects_invalid_quota_values(max_storage):
+    """Drive quota bytes must be non-negative JSON-safe integers."""
+    client, subscription, url = _drive_subscription_api()
+    original = subscription.entitlements.get(account_type="user").config
+
+    response = client.patch(
+        url,
+        {
+            "entitlements": [
+                {
+                    "type": models.Entitlement.EntitlementType.DRIVE_STORAGE,
+                    "account_type": "user",
+                    "config": {"max_storage": max_storage},
+                }
+            ]
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400
+    subscription.entitlements.get(account_type="user").refresh_from_db()
+    assert subscription.entitlements.get(account_type="user").config == original
+
+
+@pytest.mark.parametrize(
+    "entitlements",
+    [
+        [
+            {
+                "type": models.Entitlement.EntitlementType.DRIVE_STORAGE,
+                "account_type": "user",
+                "config": {"max_storage": 1, "unknown": 2},
+            }
+        ],
+        [
+            {
+                "type": models.Entitlement.EntitlementType.DRIVE_STORAGE,
+                "account_type": "mailbox",
+                "config": {"max_storage": 1},
+            }
+        ],
+        [
+            {
+                "type": models.Entitlement.EntitlementType.DRIVE_STORAGE,
+                "account_type": "user",
+                "config": {"max_storage": 1},
+            },
+            {
+                "type": models.Entitlement.EntitlementType.DRIVE_STORAGE,
+                "account_type": "user",
+                "config": {"max_storage": 2},
+            },
+        ],
+    ],
+)
+def test_api_drive_subscription_rejects_invalid_quota_contract(entitlements):
+    """Drive accepts only its default scopes, config keys, and one row per scope."""
+    client, subscription, url = _drive_subscription_api()
+    original = {
+        entitlement.account_type: entitlement.config
+        for entitlement in subscription.entitlements.all()
+    }
+
+    response = client.patch(url, {"entitlements": entitlements}, format="json")
+
+    assert response.status_code == 400
+    assert {
+        entitlement.account_type: entitlement.config
+        for entitlement in subscription.entitlements.all()
+    } == original
+
+
+def test_api_drive_subscription_rolls_back_mixed_quota_update():
+    """One invalid quota rejects the whole subscription update."""
+    client, subscription, url = _drive_subscription_api()
+    original = {
+        entitlement.account_type: entitlement.config
+        for entitlement in subscription.entitlements.all()
+    }
+
+    response = client.patch(
+        url,
+        {
+            "is_active": False,
+            "entitlements": [
+                {
+                    "type": models.Entitlement.EntitlementType.DRIVE_STORAGE,
+                    "account_type": "user",
+                    "config": {"max_storage": 1},
+                },
+                {
+                    "type": models.Entitlement.EntitlementType.DRIVE_STORAGE,
+                    "account_type": "organization",
+                    "config": {"max_storage": -1},
+                },
+            ],
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400
+    subscription.refresh_from_db()
+    assert subscription.is_active is True
+    assert {
+        entitlement.account_type: entitlement.config
+        for entitlement in subscription.entitlements.all()
+    } == original
+
+
 def test_api_subscription_entitlements_does_not_override_account_specific():
     """Entitlements input should not override account-specific entitlements."""
     user = factories.UserFactory()
@@ -716,7 +883,7 @@ def test_api_subscription_without_entitlements_key():
 
 
 def test_api_subscription_with_duplicate_entitlements():
-    """Sending duplicate entitlements (same type+account_type) should use the last value."""
+    """Sending duplicate entitlements for one scope should be rejected."""
     user = factories.UserFactory()
     client = APIClient()
     client.force_login(user)
@@ -749,12 +916,10 @@ def test_api_subscription_with_duplicate_entitlements():
         },
         format="json",
     )
-    assert response.status_code == 201
-    data = response.json()
-
-    # Should only have one entitlement with the last value
-    assert len(data["entitlements"]) == 1
-    assert data["entitlements"][0]["config"]["max_storage"] == 9999
+    assert response.status_code == 400
+    assert not models.ServiceSubscription.objects.filter(
+        organization=organization, service=service, operator=operator
+    ).exists()
 
 
 def test_api_subscription_with_unknown_entitlement_type():
